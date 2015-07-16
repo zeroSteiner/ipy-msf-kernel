@@ -33,6 +33,8 @@
 #
 
 import os
+import re
+import shlex
 import signal
 
 import pexpect
@@ -43,7 +45,6 @@ from IPython.kernel.zmq.kernelapp import IPKernelApp
 __version__ = '0.1'
 
 class MetasploitKernel(Kernel):
-	_banner = None
 	implementation = 'msf_kernel'
 	implementation_version = __version__
 	language = 'metasploit'
@@ -54,7 +55,11 @@ class MetasploitKernel(Kernel):
 	}
 	@property
 	def language_version(self):
-		return __version__
+		version_output = self.msf_wrapper.run_command('version')
+		match = re.search(r'Framework: (\d(\.\d{1,4}){2}(-\w+)?)', version_output)
+		if match:
+			return match.group(1)
+		return ''
 
 	@property
 	def banner(self):
@@ -62,6 +67,7 @@ class MetasploitKernel(Kernel):
 
 	def __init__(self, *args, **kwargs):
 		super(MetasploitKernel, self).__init__(*args, **kwargs)
+		self._child = None
 		self._setup_env()
 		self._start_msfconsole()
 
@@ -77,18 +83,32 @@ class MetasploitKernel(Kernel):
 	def _start_msfconsole(self):
 		sig = signal.signal(signal.SIGINT, signal.SIG_DFL)
 		try:
-			child = pexpect.spawn('./msfconsole', cwd=os.environ.get('MSF_HOME'), maxread=5000, echo=False)
-			self.msf_wrapper = pexpect.replwrap.REPLWrapper(child, '\x1b[0m> ', None, new_prompt='\x1b[0m> ')
+			self._child = pexpect.spawn('./msfconsole', cwd=os.environ.get('MSF_HOME'), maxread=5000, echo=False)
+			self.msf_wrapper = pexpect.replwrap.REPLWrapper(self._child, '\x1b[0m> ', None, new_prompt='\x1b[0m> ')
 		finally:
 			signal.signal(signal.SIGINT, sig)
+
+	def _cmd_getpid(self, args, silent):
+		output = "PID = {0}".format(self._child.pid)
+		if not silent:
+			stream_content = {'name': 'stdout', 'text': output}
+			self.send_response(self.iopub_socket, 'stream', stream_content)
+
+		return {'status': 'ok', 'execution_count': self.execution_count, 'payload': [], 'user_expressions': {}}
 
 	def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
 		if not code.strip():
 			return {'status': 'ok', 'execution_count': self.execution_count, 'payload': [], 'user_expressions': {}}
 
+		code = code.rstrip()
+		if code.startswith('%'):
+			args = shlex.split(code)
+			cmd = args.pop(0)[1:]
+			if hasattr(self, '_cmd_' + cmd):
+				return getattr(self, '_cmd_' + cmd)(args, silent)
 		interrupted = False
 		try:
-			output = self.msf_wrapper.run_command(code.rstrip(), timeout=None)
+			output = self.msf_wrapper.run_command(code, timeout=None)
 		except KeyboardInterrupt:
 			self.msf_wrapper.child.sendintr()
 			interrupted = True
