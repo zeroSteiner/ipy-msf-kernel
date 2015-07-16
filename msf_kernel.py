@@ -89,34 +89,37 @@ class MetasploitKernel(Kernel):
 			signal.signal(signal.SIGINT, sig)
 
 	def _cmd_getpid(self, args, silent):
-		output = "PID = {0}".format(self._child.pid)
-		if not silent:
-			stream_content = {'name': 'stdout', 'text': output}
-			self.send_response(self.iopub_socket, 'stream', stream_content)
-
-		return {'status': 'ok', 'execution_count': self.execution_count, 'payload': [], 'user_expressions': {}}
+		return "PID = {0}\n".format(self._child.pid)
 
 	def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
 		if not code.strip():
 			return {'status': 'ok', 'execution_count': self.execution_count, 'payload': [], 'user_expressions': {}}
 
+		output = ''
 		code = code.rstrip()
-		if code.startswith('%'):
-			args = shlex.split(code)
+		while code.startswith('%'):
+			if '\n' in code:
+				cmd, code = code.split('\n', 1)
+			else:
+				cmd = code
+				code = ''
+			args = shlex.split(cmd)
 			cmd = args.pop(0)[1:]
 			if hasattr(self, '_cmd_' + cmd):
-				return getattr(self, '_cmd_' + cmd)(args, silent)
+				output += getattr(self, '_cmd_' + cmd)(args, silent)
+
 		interrupted = False
-		try:
-			output = self.msf_wrapper.run_command(code, timeout=None)
-		except KeyboardInterrupt:
-			self.msf_wrapper.child.sendintr()
-			interrupted = True
-			self.msf_wrapper._expect_prompt()
-			output = self.msf_wrapper.child.before
-		except pexpect.EOF:
-			output = self.msf_wrapper.child.before + 'Restarting Metasploit'
-			self._start_msfconsole()
+		if code:
+			try:
+				output += self.msf_wrapper.run_command(code, timeout=None)
+			except KeyboardInterrupt:
+				self.msf_wrapper.child.sendintr()
+				interrupted = True
+				self.msf_wrapper._expect_prompt()
+				output = self.msf_wrapper.child.before
+			except pexpect.EOF:
+				output = self.msf_wrapper.child.before + 'Restarting Metasploit'
+				self._start_msfconsole()
 
 		if not silent:
 			# Send standard output
