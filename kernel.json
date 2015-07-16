@@ -1,0 +1,1 @@
+{"argv": ["/bin/python", "-m", "msf_kernel", "-f", "{connection_file}"], "display_name": "Metasploit", "language": "metasploit"}
