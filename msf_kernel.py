@@ -39,8 +39,8 @@ import signal
 
 import pexpect
 import pexpect.replwrap
-from IPython.kernel.zmq.kernelbase import Kernel
-from IPython.kernel.zmq.kernelapp import IPKernelApp
+from ipykernel.kernelbase import Kernel
+from ipykernel.kernelapp import IPKernelApp
 
 __version__ = '0.1'
 
@@ -53,6 +53,12 @@ class MetasploitKernel(Kernel):
 		'mimetype': 'text/plain',
 		'file_extension': '.rc'
 	}
+	def __init__(self, *args, **kwargs):
+		super(MetasploitKernel, self).__init__(*args, **kwargs)
+		self._child = None
+		self._setup_env()
+		self._start_msfconsole()
+
 	@property
 	def language_version(self):
 		version_output = self.msf_wrapper.run_command('version')
@@ -65,26 +71,28 @@ class MetasploitKernel(Kernel):
 	def banner(self):
 		return self.msf_wrapper.run_command('banner')
 
-	def __init__(self, *args, **kwargs):
-		super(MetasploitKernel, self).__init__(*args, **kwargs)
-		self._child = None
-		self._setup_env()
-		self._start_msfconsole()
-
 	def _setup_env(self):
-		if 'GEM_HOME' in os.environ and not os.environ['GEM_HOME'].endswith('@metasploit-framework'):
-			os.environ['GEM_HOME'] = os.environ['GEM_HOME'] + '@metasploit-framework'
-		if 'GEM_PATH' in os.environ:
-			gem_path_parts = os.environ['GEM_PATH'].split(os.pathsep)
-			if not gem_path_parts[0].endswith('@metasploit-framework'):
-				gem_path_parts[0] = gem_path_parts[0] + '@metasploit-framework'
-				os.environ['GEM_PATH'] = ':'.join(gem_path_parts)
+		os.environ['GEM_HOME'] = os.path.expanduser('~/.rvm/gems/ruby-2.1.4@metasploit-framework')
+		gem_paths = ('~/.rvm/gems/ruby-2.1.4@metasploit-framework', '~/.rvm/gems/ruby-2.1.4@global')
+		os.environ['GEM_PATH'] = ':'.join([os.path.expanduser(p) for p in gem_paths])
+		os.environ['MSF_HOME'] = os.path.expanduser('~/repos/msf')
 
 	def _start_msfconsole(self):
 		sig = signal.signal(signal.SIGINT, signal.SIG_DFL)
 		try:
-			self._child = pexpect.spawn('./msfconsole', cwd=os.environ.get('MSF_HOME'), maxread=5000, echo=False)
-			self.msf_wrapper = pexpect.replwrap.REPLWrapper(self._child, '\x1b[0m> ', None, new_prompt='\x1b[0m> ')
+			self._child = pexpect.spawn(
+				'./msfconsole -q',
+				cwd=os.environ.get('MSF_HOME'),
+				echo=False,
+				maxread=5000
+			)
+			self.msf_wrapper = pexpect.replwrap.REPLWrapper(
+				self._child,
+				'\x1b[0m> ',
+				None,
+				'\x1b[0m> '
+			)
+
 		finally:
 			signal.signal(signal.SIGINT, sig)
 
@@ -122,7 +130,7 @@ class MetasploitKernel(Kernel):
 				self._start_msfconsole()
 
 		if not silent:
-			# Send standard output
+			# send standard output
 			stream_content = {'name': 'stdout', 'text': output}
 			self.send_response(self.iopub_socket, 'stream', stream_content)
 
