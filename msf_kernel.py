@@ -33,9 +33,11 @@
 #
 
 import os
+import random
 import re
 import shlex
 import signal
+import string
 
 import pexpect
 import pexpect.replwrap
@@ -43,6 +45,32 @@ from ipykernel.kernelbase import Kernel
 from ipykernel.kernelapp import IPKernelApp
 
 __version__ = '0.1'
+
+class MsfconsoleREPLWrapper(pexpect.replwrap.REPLWrapper):
+	def __init__(self):
+		self.child = pexpect.spawn(
+			'./msfconsole',
+			args=['--real-readline', '--quiet', '--execute-command', 'color true'],
+			cwd=os.environ['MSF_HOME'],
+			echo=False,
+			maxread=5000
+		)
+		orig_prompt = re.escape('\x1b[0m> ')
+		self._main_prompt_prefix = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(16))
+		prompt_change = "set Prompt {0}".format(self._main_prompt_prefix)
+		new_prompt = re.escape(self._main_prompt_prefix) + '( [a-z]+\(.*\) )?' + re.escape('\x1b[0m> ')
+		self.meterpreter_prompt = re.escape('\x1b[4mmeterpreter\x1b[0m > ')
+		super(MsfconsoleREPLWrapper, self).__init__(
+			self.child,
+			orig_prompt,
+			prompt_change,
+			new_prompt
+		)
+
+	def _expect_prompt(self, timeout=-1):
+		timeout = max(timeout, 10)
+		self.child.expect([self.prompt, self.meterpreter_prompt], timeout=timeout)
+		return 0
 
 class MetasploitKernel(Kernel):
 	implementation = 'msf_kernel'
@@ -55,7 +83,7 @@ class MetasploitKernel(Kernel):
 	}
 	def __init__(self, *args, **kwargs):
 		super(MetasploitKernel, self).__init__(*args, **kwargs)
-		self._child = None
+		self.timeout = 5
 		self._setup_env()
 		self._start_msfconsole()
 
@@ -71,66 +99,41 @@ class MetasploitKernel(Kernel):
 	def banner(self):
 		return self.msf_wrapper.run_command('banner')
 
+	@property
+	def child(self):
+		if self.msf_wrapper is None:
+			return None
+		return self.msf_wrapper.child
+
 	def _setup_env(self):
-		os.environ['GEM_HOME'] = os.path.expanduser('~/.rvm/gems/ruby-2.1.4@metasploit-framework')
-		gem_paths = ('~/.rvm/gems/ruby-2.1.4@metasploit-framework', '~/.rvm/gems/ruby-2.1.4@global')
+		os.environ['GEM_HOME'] = os.path.expanduser('~/.rvm/gems/ruby-2.1.6')
+		gem_paths = ('~/.rvm/gems/ruby-2.1.6', '~/.rvm/gems/ruby-2.1.6@global')
 		os.environ['GEM_PATH'] = ':'.join([os.path.expanduser(p) for p in gem_paths])
 		os.environ['MSF_HOME'] = os.path.expanduser('~/repos/msf')
+		os.environ['RUBY_VERSION'] = 'ruby-2.1.6'
 
 	def _start_msfconsole(self):
 		sig = signal.signal(signal.SIGINT, signal.SIG_DFL)
 		try:
-			self._child = pexpect.spawn(
-				'./msfconsole -q',
-				cwd=os.environ.get('MSF_HOME'),
-				echo=False,
-				maxread=5000
-			)
-			self.msf_wrapper = pexpect.replwrap.REPLWrapper(
-				self._child,
-				'\x1b[0m> ',
-				None,
-				'\x1b[0m> '
-			)
-
+			self.msf_wrapper = MsfconsoleREPLWrapper()
 		finally:
 			signal.signal(signal.SIGINT, sig)
 
 	def _cmd_getpid(self, args, silent):
-		return "PID = {0}\n".format(self._child.pid)
+		return "PID = {0}\n".format(self.child.pid)
 
 	def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
 		if not code.strip():
 			return {'status': 'ok', 'execution_count': self.execution_count, 'payload': [], 'user_expressions': {}}
 
 		output = ''
-		code = code.rstrip()
-		while code.startswith('%'):
-			if '\n' in code:
-				cmd, code = code.split('\n', 1)
-			else:
-				cmd = code
-				code = ''
-			args = shlex.split(cmd)
-			cmd = args.pop(0)[1:]
-			if hasattr(self, '_cmd_' + cmd):
-				output += getattr(self, '_cmd_' + cmd)(args, silent)
-
-		interrupted = False
-		if code:
-			try:
-				output += self.msf_wrapper.run_command(code, timeout=None)
-			except KeyboardInterrupt:
-				self.msf_wrapper.child.sendintr()
-				interrupted = True
-				self.msf_wrapper._expect_prompt()
-				output = self.msf_wrapper.child.before
-			except pexpect.EOF:
-				output = self.msf_wrapper.child.before + 'Restarting Metasploit'
-				self._start_msfconsole()
+		for cmd in code.split('\n'):
+			cmd_out, interrupted = self.do_execute_command(cmd, silent)
+			output += cmd_out
+			if interrupted:
+				break
 
 		if not silent:
-			# send standard output
 			stream_content = {'name': 'stdout', 'text': output}
 			self.send_response(self.iopub_socket, 'stream', stream_content)
 
@@ -138,6 +141,27 @@ class MetasploitKernel(Kernel):
 			return {'status': 'abort', 'execution_count': self.execution_count}
 
 		return {'status': 'ok', 'execution_count': self.execution_count, 'payload': [], 'user_expressions': {}}
+
+	def do_execute_command(self, cmd, silent):
+		interrupted = False
+		if cmd.startswith('%'):
+			args = shlex.split(cmd)
+			cmd = args.pop(0)[1:]
+			if hasattr(self, '_cmd_' + cmd):
+				return getattr(self, '_cmd_' + cmd)(args, silent), interrupted
+
+		output = ''
+		try:
+			output = self.msf_wrapper.run_command(cmd, timeout=self.timeout)
+		except KeyboardInterrupt:
+			self.msf_wrapper.child.sendintr()
+			interrupted = True
+			self.msf_wrapper._expect_prompt()
+			output = self.msf_wrapper.child.before
+		except pexpect.EOF:
+			output = self.msf_wrapper.child.before + 'Restarting Metasploit'
+			self._start_msfconsole()
+		return output, interrupted
 
 if __name__ == '__main__':
 	IPKernelApp.launch_instance(kernel_class=MetasploitKernel)
