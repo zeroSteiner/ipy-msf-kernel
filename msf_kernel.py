@@ -44,7 +44,7 @@ import pexpect.replwrap
 from ipykernel.kernelbase import Kernel
 from ipykernel.kernelapp import IPKernelApp
 
-__version__ = '0.1'
+__version__ = '0.2'
 
 class MsfconsoleREPLWrapper(pexpect.replwrap.REPLWrapper):
 	def __init__(self):
@@ -68,7 +68,6 @@ class MsfconsoleREPLWrapper(pexpect.replwrap.REPLWrapper):
 		)
 
 	def _expect_prompt(self, timeout=-1):
-		timeout = max(timeout, 10)
 		self.child.expect([self.prompt, self.meterpreter_prompt], timeout=timeout)
 		return 0
 
@@ -120,7 +119,12 @@ class MetasploitKernel(Kernel):
 			signal.signal(signal.SIGINT, sig)
 
 	def _cmd_getpid(self, args, silent):
-		return "PID = {0}\n".format(self.child.pid)
+		return "pid = {0}\n".format(self.child.pid)
+
+	def _cmd_timeout(self, args, silent):
+		if len(args) and re.match(r'^\d+(\.\d+)?$', args[0]):
+			self.timeout = float(args[0])
+		return "timeout = {0:.01f}\n".format(self.timeout)
 
 	def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
 		if not code.strip():
